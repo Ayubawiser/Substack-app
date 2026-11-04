@@ -1,4 +1,5 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ensureFirebaseUser, loadWorkspace, saveWorkspace } from "./firebase";
 import * as XLSX from "xlsx";
 import {
   LayoutDashboard, Users, FolderKanban, FileCheck2, Bell, Search,
@@ -112,10 +113,58 @@ function App() {
   const [dataModal, setDataModal] = useState<"import" | "export" | null>(null);
   const [importMode, setImportMode] = useState<"merge" | "replace">("merge");
   const [importBusy, setImportBusy] = useState(false);
+  const [cloudUserId, setCloudUserId] = useState<string | null>(null);
+  const [cloudReady, setCloudReady] = useState(false);
+  const [cloudMessage, setCloudMessage] = useState("Connecting to cloud…");
   const importInput = useRef<HTMLInputElement>(null);
 
   const persistSubs = (next: Subcontractor[]) => { setSubs(next); localStorage.setItem("subtrack-subs", JSON.stringify(next)); };
   const persistProjects = (next: Project[]) => { setProjects(next); localStorage.setItem("subtrack-projects", JSON.stringify(next)); };
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const user = await ensureFirebaseUser();
+        if (!active) return;
+        setCloudUserId(user.uid);
+        const remote = await loadWorkspace(user.uid);
+        if (!active) return;
+        if (remote) {
+          if (Array.isArray(remote.subs)) {
+            setSubs(remote.subs as Subcontractor[]);
+            localStorage.setItem("subtrack-subs", JSON.stringify(remote.subs));
+          }
+          if (Array.isArray(remote.projects)) {
+            setProjects(remote.projects as Project[]);
+            localStorage.setItem("subtrack-projects", JSON.stringify(remote.projects));
+          }
+          setCloudMessage("Cloud connected · data loaded");
+        } else {
+          const localSubs = (() => { try { const v = localStorage.getItem("subtrack-subs"); return v ? JSON.parse(v) as Subcontractor[] : initialSubs; } catch { return initialSubs; } })();
+          const localProjects = (() => { try { const v = localStorage.getItem("subtrack-projects"); return v ? JSON.parse(v) as Project[] : initialProjects; } catch { return initialProjects; } })();
+          setSubs(localSubs); setProjects(localProjects);
+          await saveWorkspace(user.uid, localSubs, localProjects);
+          setCloudMessage("Cloud connected · workspace created");
+        }
+        setCloudReady(true);
+      } catch (error) {
+        console.error("Firebase connection failed", error);
+        if (active) setCloudMessage("Cloud connection failed · check Firebase setup");
+      }
+    })();
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!cloudReady || !cloudUserId) return;
+    const timer = window.setTimeout(() => {
+      saveWorkspace(cloudUserId, subs, projects)
+        .then(() => setCloudMessage("All changes saved to cloud"))
+        .catch(error => { console.error("Cloud save failed", error); setCloudMessage("Cloud save failed · retry after checking connection"); });
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [subs, projects, cloudReady, cloudUserId]);
   const cleared = subs.filter(s => subStatus(s) === "Cleared").length;
   const missing = subs.reduce((n, s) => n + s.documents.filter(d => docStatus(d) === "Missing" || docStatus(d) === "Expired").length, 0);
   const expiring = subs.reduce((n, s) => n + s.documents.filter(d => docStatus(d) === "Expiring soon").length, 0);
